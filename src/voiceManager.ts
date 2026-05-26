@@ -51,33 +51,38 @@ export class VoiceManager {
       adapterCreator: channel.guild.voiceAdapterCreator,
       selfDeaf: false, // must NOT be deaf — we need to receive audio
       selfMute: true, // we never speak
+      debug: true, // emit low-level voice ws/udp events (see "voice-dbg" logs)
     });
 
-    // Log every state transition. This is the single most useful signal for the
-    // UDP problem: a healthy connection goes
-    //   signalling -> connecting -> ready
-    // If it stalls at "connecting" (UDP handshake) or bounces signalling, the
-    // voice UDP path isn't getting through.
+    // Log every state transition. Healthy path: signalling -> connecting -> ready.
     connection.on("stateChange", (oldState, newState) => {
       log.info("voice", `state ${oldState.status} -> ${newState.status}`);
     });
     connection.on("error", (err) => log.error("voice", "connection error", { error: String(err) }));
+    // Low-level debug: this surfaces the voice WebSocket close code (e.g. 4016 =
+    // unknown encryption mode, 4006 = invalid session) and the encryption modes
+    // Discord offered vs. what we selected — the key to the connecting->signalling bounce.
+    connection.on("debug", (msg) => log.debug("voice-dbg", msg));
 
     const connectStart = Date.now();
     try {
       await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
       log.info("voice", "reached Ready", { ms: Date.now() - connectStart });
     } catch (err) {
-      // The UDP voice path never came up. Tear down the half-open connection so
-      // we don't leak it. The last "state ->" log line above shows where it stalled.
-      log.error("voice", "failed to reach Ready (UDP path)", {
+      // Never reached Ready. The voice WS/handshake failed — see the "voice-dbg"
+      // lines just above for the close code / reason.
+      log.error("voice", "failed to reach Ready", {
         ms: Date.now() - connectStart,
         lastState: connection.state.status,
         error: String(err),
       });
-      connection.destroy();
+      // Guard: the connection may already be destroyed (the bounce path destroys
+      // it), so destroying again throws "already been destroyed".
+      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        connection.destroy();
+      }
       throw new VoiceConnectError(
-        "Couldn't establish the voice (UDP) connection — it timed out reaching Ready.",
+        "Couldn't establish the voice connection — handshake failed before Ready.",
         { cause: err },
       );
     }

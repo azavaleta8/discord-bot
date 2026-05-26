@@ -38,13 +38,22 @@ export function createBot(): Client {
 
     // Guild-scoped registration updates instantly; global takes up to an hour.
     const guildId = process.env.GUILD_ID;
-    if (guildId) {
-      const guild = await client.guilds.fetch(guildId);
-      await guild.commands.set(commands);
-      log.info("bot", `registered ${commands.length} commands`, { guildId });
-    } else {
-      await client.application?.commands.set(commands);
-      log.info("bot", `registered ${commands.length} global commands`);
+    try {
+      if (guildId) {
+        const guild = await client.guilds.fetch(guildId);
+        await guild.commands.set(commands);
+        log.info("bot", `registered ${commands.length} commands`, { guildId });
+      } else {
+        await client.application?.commands.set(commands);
+        log.info("bot", `registered ${commands.length} global commands`);
+      }
+    } catch (err) {
+      // Most common cause: the bot isn't in GUILD_ID (e.g. it was kicked). The
+      // bot still runs; existing commands may persist. Re-invite + restart to fix.
+      log.error("bot", "command registration failed — is the bot in GUILD_ID?", {
+        guildId,
+        error: String(err),
+      });
     }
   });
 
@@ -123,10 +132,10 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
         log.info("join", "voice connection ready ✅", { channel: channel.name });
       } catch (err) {
         if (err instanceof VoiceConnectError) {
-          log.warn("join", "voice (UDP) connection timed out ⚠️", { error: String(err.cause ?? err) });
+          log.warn("join", "voice connection failed ⚠️", { error: String(err.cause ?? err) });
           await interaction.editReply(
-            "⚠️ Joined the channel but couldn't open the **voice (UDP) connection** — it timed out. " +
-              "This usually means UDP to Discord's voice servers is blocked or unreachable from this host.",
+            "⚠️ Joined the channel but the **voice connection** didn't complete (handshake failed before Ready). " +
+              "Check the `voice-dbg` logs for the close code.",
           );
           return;
         }
