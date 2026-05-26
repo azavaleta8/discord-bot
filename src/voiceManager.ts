@@ -9,6 +9,7 @@ import {
 import type { VoiceBasedChannel } from "discord.js";
 import prism from "prism-media";
 import { FRAME_MS, SAMPLE_RATE, CHANNELS } from "./audio";
+import { log } from "./logger";
 import { RingBuffer } from "./RingBuffer";
 
 const MAX_USERS = Number(process.env.MAX_USERS ?? 12);
@@ -52,11 +53,28 @@ export class VoiceManager {
       selfMute: true, // we never speak
     });
 
+    // Log every state transition. This is the single most useful signal for the
+    // UDP problem: a healthy connection goes
+    //   signalling -> connecting -> ready
+    // If it stalls at "connecting" (UDP handshake) or bounces signalling, the
+    // voice UDP path isn't getting through.
+    connection.on("stateChange", (oldState, newState) => {
+      log.info("voice", `state ${oldState.status} -> ${newState.status}`);
+    });
+    connection.on("error", (err) => log.error("voice", "connection error", { error: String(err) }));
+
+    const connectStart = Date.now();
     try {
       await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+      log.info("voice", "reached Ready", { ms: Date.now() - connectStart });
     } catch (err) {
-      // The UDP voice path never came up (commonly blocked or NAT'd, e.g. under
-      // WSL2). Tear down the half-open connection so we don't leak it.
+      // The UDP voice path never came up. Tear down the half-open connection so
+      // we don't leak it. The last "state ->" log line above shows where it stalled.
+      log.error("voice", "failed to reach Ready (UDP path)", {
+        ms: Date.now() - connectStart,
+        lastState: connection.state.status,
+        error: String(err),
+      });
       connection.destroy();
       throw new VoiceConnectError(
         "Couldn't establish the voice (UDP) connection — it timed out reaching Ready.",
@@ -69,6 +87,7 @@ export class VoiceManager {
 
     const receiver = connection.receiver;
     receiver.speaking.on("start", (userId) => {
+      log.debug("voice", "speaking start", { userId });
       this.startReceiving(session, userId);
     });
 
@@ -83,14 +102,15 @@ export class VoiceManager {
     if (existing?.subscribed) return; // already streaming this user
 
     if (!existing && session.users.size >= MAX_USERS) {
-      // RAM guard: refuse new buffers once we hit the cap (~11.5 MB each).
-      console.warn(`[voice] MAX_USERS (${MAX_USERS}) reached, skipping ${userId}`);
+      // RAM guard: refuse new buffers once we hit the cap.
+      log.warn("voice", `MAX_USERS (${MAX_USERS}) reached, skipping`, { userId });
       return;
     }
 
     const ring = existing?.ring ?? new RingBuffer();
     const entry: UserEntry = { ring, lastDataTs: 0, subscribed: true };
     session.users.set(userId, entry);
+    log.info("voice", "subscribed to user audio", { userId, activeUsers: session.users.size });
 
     // Manual end behaviour: keep the subscription open for the whole session.
     // Discord simply stops sending frames during silence; we detect the gap and
@@ -105,7 +125,12 @@ export class VoiceManager {
       frameSize: 960, // 20ms @ 48kHz
     });
 
+    let firstChunkLogged = false;
     const onData = (chunk: Buffer) => {
+      if (!firstChunkLogged) {
+        firstChunkLogged = true;
+        log.info("voice", "receiving decoded audio ✅", { userId, frameBytes: chunk.length });
+      }
       const now = Date.now();
       if (entry.lastDataTs !== 0) {
         // Anything beyond one normal frame interval is real silence to pad.

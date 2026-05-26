@@ -8,6 +8,7 @@ import {
 } from "discord.js";
 import { BUFFER_SECONDS } from "./audio";
 import { EncodeQueue } from "./encodeQueue";
+import { log, timed } from "./logger";
 import { encodeToOgg, mixTracks } from "./mixer";
 import { VoiceConnectError, VoiceManager } from "./voiceManager";
 
@@ -33,26 +34,45 @@ export function createBot(): Client {
   });
 
   client.once("ready", async () => {
-    console.log(`[bot] logged in as ${client.user?.tag}`);
+    log.info("bot", `logged in as ${client.user?.tag}`, { wsPing: client.ws.ping });
 
     // Guild-scoped registration updates instantly; global takes up to an hour.
     const guildId = process.env.GUILD_ID;
     if (guildId) {
       const guild = await client.guilds.fetch(guildId);
       await guild.commands.set(commands);
-      console.log(`[bot] registered ${commands.length} commands in guild ${guildId}`);
+      log.info("bot", `registered ${commands.length} commands`, { guildId });
     } else {
       await client.application?.commands.set(commands);
-      console.log(`[bot] registered ${commands.length} global commands`);
+      log.info("bot", `registered ${commands.length} global commands`);
     }
   });
 
+  // Surface gateway connectivity — high ping here directly explains 10062s.
+  client.on("shardReady", (id) => log.info("gateway", `shard ${id} ready`, { wsPing: client.ws.ping }));
+  client.on("shardDisconnect", (e, id) => log.warn("gateway", `shard ${id} disconnected`, { code: e.code }));
+  client.on("shardReconnecting", (id) => log.warn("gateway", `shard ${id} reconnecting`));
+  client.on("shardResume", (id) => log.info("gateway", `shard ${id} resumed`, { wsPing: client.ws.ping }));
+  client.on("error", (err) => log.error("client", "client error", { error: String(err) }));
+  client.on("warn", (msg) => log.warn("client", msg));
+
   client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
+
+    // staleMs = how old the interaction already is when we receive it. If this
+    // is anywhere near 3000ms, the gateway delivered it slowly and a 10062 on
+    // deferReply is expected — points at gateway latency, not our code.
+    const staleMs = Date.now() - interaction.createdTimestamp;
+    log.info("interaction", `${interaction.commandName} from ${interaction.user.tag}`, {
+      staleMs,
+      wsPing: client.ws.ping,
+      guildId: interaction.guildId,
+    });
+
     try {
       await handleCommand(interaction);
     } catch (err) {
-      console.error("[bot] command error:", err);
+      log.error("interaction", `${interaction.commandName} failed`, { error: String(err), staleMs });
       const msg = "Something went wrong handling that command.";
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply(msg).catch(() => {});
@@ -87,21 +107,26 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
     case "join": {
       // Defer FIRST — Discord kills the interaction token after ~3s, and the
       // member fetch + voice connection below can take longer than that.
-      await interaction.deferReply();
-      const member = await interaction.guild.members.fetch(interaction.user.id);
+      await timed("join", "deferReply", () => interaction.deferReply());
+      const member = await timed("join", "fetchMember", () =>
+        interaction.guild!.members.fetch(interaction.user.id),
+      );
       const channel = member.voice.channel;
       if (!channel) {
+        log.info("join", "user not in a voice channel");
         await interaction.editReply("Join a voice channel first, then run /join.");
         return;
       }
+      log.info("join", `joining voice channel`, { channel: channel.name, channelId: channel.id });
       try {
         await voice.join(channel);
+        log.info("join", "voice connection ready ✅", { channel: channel.name });
       } catch (err) {
         if (err instanceof VoiceConnectError) {
+          log.warn("join", "voice (UDP) connection timed out ⚠️", { error: String(err.cause ?? err) });
           await interaction.editReply(
             "⚠️ Joined the channel but couldn't open the **voice (UDP) connection** — it timed out. " +
-              "This usually means UDP to Discord's voice servers is blocked or NAT'd (common on WSL2). " +
-              "It should work when deployed to a real host (e.g. Render).",
+              "This usually means UDP to Discord's voice servers is blocked or unreachable from this host.",
           );
           return;
         }
@@ -130,22 +155,30 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       }
 
       const snapshots = voice.snapshotAll(guildId);
+      const totalBytes = snapshots.reduce((n, s) => n + s.length, 0);
+      log.info("clip", "snapshot taken", { speakers: snapshots.length, totalBytes });
       if (snapshots.length === 0) {
         await interaction.reply({ content: "No audio buffered yet — say something first!", flags: MessageFlags.Ephemeral });
         return;
       }
 
-      await interaction.deferReply();
+      await timed("clip", "deferReply", () => interaction.deferReply());
 
       // Mix synchronously, then queue the FFmpeg encode to bound RAM/CPU.
+      const mixStart = Date.now();
       const mixed = mixTracks(snapshots);
-      const ogg = await encodeQueue.run(() => encodeToOgg(mixed));
+      log.info("clip", "mixed", { bytes: mixed.length, ms: Date.now() - mixStart });
+
+      const ogg = await timed("clip", "ffmpeg encode", () => encodeQueue.run(() => encodeToOgg(mixed)));
+      log.info("clip", "encoded", { oggBytes: ogg.length });
 
       const file = new AttachmentBuilder(ogg, { name: `clip-${Date.now()}.ogg` });
-      await interaction.editReply({
-        content: `🎬 Last ${BUFFER_SECONDS}s — ${snapshots.length} speaker(s).`,
-        files: [file],
-      });
+      await timed("clip", "upload", () =>
+        interaction.editReply({
+          content: `🎬 Last ${BUFFER_SECONDS}s — ${snapshots.length} speaker(s).`,
+          files: [file],
+        }),
+      );
       return;
     }
   }
