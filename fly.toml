@@ -1,0 +1,38 @@
+# Fly.io config — https://fly.io/docs/reference/configuration/
+# IMPORTANT: `app` must be globally unique. Change it to your own name before
+# deploying (or let `fly launch` set it for you).
+app = "discord-audio-dashcam"
+primary_region = "iad" # change to a region near you: fly platform regions
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Non-secret config. Secrets (DISCORD_TOKEN, CLIENT_ID, GUILD_ID) are set with
+# `fly secrets set ...`, never committed here.
+[env]
+  PORT = "3000"
+  BUFFER_SECONDS = "15"
+  MAX_USERS = "12"
+  ENCODE_CONCURRENCY = "1"
+
+# Keep-alive / health-check endpoint. Unlike Render, Fly does NOT spin the bot
+# down on HTTP inactivity as long as we keep one machine running, so this is
+# just a health check — the bot stays connected to Discord 24/7.
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false   # never stop — the bot must stay in voice
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/ping"
+
+# 512 MB headroom for Node + Opus decode + a transient FFmpeg process.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

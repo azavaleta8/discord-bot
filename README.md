@@ -2,8 +2,8 @@
 
 A Discord bot that joins a voice channel, continuously buffers the **last N seconds**
 of audio per speaker in memory (default **15s**, set via `BUFFER_SECONDS`), and exports
-a single mixed **OGG/Opus** clip to the text channel on `/clip`. Designed to run within
-Render's free 512 MB Web Service tier.
+a single mixed **OGG/Opus** clip to the text channel on `/clip`. Runs in ~512 MB RAM on
+a host with UDP egress (Fly.io, a VPS, etc. — **not** Render/Heroku, which block voice UDP).
 
 ## How it works
 
@@ -59,21 +59,28 @@ Requires **FFmpeg** on your PATH locally (the Docker image installs it for you).
    **Connect** + **Speak** voice permissions.
 4. Set `GUILD_ID` to your test server for instant slash-command registration.
 
-## Deploy to Render (free tier)
+## Deploy to Fly.io
 
-1. Push this repo to GitHub.
-2. Render → **New → Web Service** → connect the repo.
-3. Environment: **Docker** (uses the included `Dockerfile`).
-4. Add env vars: `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`. (`PORT` is automatic.)
-5. Deploy.
+> **Why not Render/Heroku?** Discord voice runs over **UDP**, and HTTP-only
+> platforms like Render and Heroku don't route outbound UDP — the gateway and
+> slash commands work, but the voice connection times out. Fly.io (and any real
+> VM/VPS) gives the container normal UDP egress, so voice works.
 
-### Keep it awake
+1. Install the CLI: `curl -L https://fly.io/install.sh | sh` (then add it to PATH
+   as the installer prints).
+2. `fly auth signup` (or `fly auth login`).
+3. Edit `fly.toml`: set a unique `app` name and a `primary_region` near you
+   (`fly platform regions` lists them).
+4. Create the app without deploying yet: `fly launch --no-deploy --copy-config`.
+5. Set your secrets (never commit these):
+   ```bash
+   fly secrets set DISCORD_TOKEN=... CLIENT_ID=... GUILD_ID=...
+   ```
+6. Deploy: `fly deploy`.
+7. Tail logs: `fly logs` — look for `logged in as ...` and `registered 3 commands`.
 
-Render free Web Services sleep after 15 min of HTTP inactivity, which would drop the
-voice connection. Point an external pinger at the `/ping` endpoint:
-
-- [UptimeRobot](https://uptimerobot.com) → HTTP(s) monitor →
-  `https://<your-service>.onrender.com/ping` → **every 14 minutes**.
+The bot stays running 24/7 (`auto_stop_machines = false`), so no external pinger
+is needed. The `/ping` endpoint is used as Fly's health check.
 
 ## Memory budget
 
