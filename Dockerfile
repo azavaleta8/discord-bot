@@ -1,6 +1,6 @@
 # Debian-slim (not Alpine): native audio modules (@discordjs/opus, sodium-native)
-# compile reliably against glibc. Node 20 is the current LTS (18 is EOL).
-FROM node:20-bookworm-slim
+# compile reliably against glibc. Node 22: @discordjs/voice 0.19+ requires >=22.12.
+FROM node:22-bookworm-slim
 
 # FFmpeg for OGG/Opus encoding; build toolchain for native module compilation.
 RUN apt-get update \
@@ -20,5 +20,5 @@ RUN npm run build
 
 ENV NODE_ENV=production
 
-# Render injects PORT at runtime; the keep-alive server binds 0.0.0.0:$PORT.
+# The host injects PORT at runtime; the keep-alive server binds 0.0.0.0:$PORT.
 CMD ["node", "dist/index.js"]
