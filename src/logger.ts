@@ -8,7 +8,12 @@
  */
 type Level = "INFO" | "WARN" | "ERROR" | "DEBUG";
 
+// DEBUG lines are suppressed unless LOG_LEVEL=debug — keeps production logs
+// clean while letting you flip on full voice diagnostics on demand.
+const DEBUG_ENABLED = process.env.LOG_LEVEL?.toLowerCase() === "debug";
+
 function emit(level: Level, tag: string, msg: string, extra?: Record<string, unknown>): void {
+  if (level === "DEBUG" && !DEBUG_ENABLED) return;
   const time = new Date().toISOString();
   let line = `${time} ${level} [${tag}] ${msg}`;
   if (extra && Object.keys(extra).length > 0) {

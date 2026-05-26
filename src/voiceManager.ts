@@ -45,13 +45,14 @@ export class VoiceManager {
 
   /** Join the given voice channel and start buffering everyone who speaks. */
   async join(channel: VoiceBasedChannel): Promise<void> {
+    const voiceDebug = process.env.LOG_LEVEL?.toLowerCase() === "debug";
     const connection = joinVoiceChannel({
       channelId: channel.id,
       guildId: channel.guild.id,
       adapterCreator: channel.guild.voiceAdapterCreator,
       selfDeaf: false, // must NOT be deaf — we need to receive audio
       selfMute: true, // we never speak
-      debug: true, // emit low-level voice ws/udp events (see "voice-dbg" logs)
+      debug: voiceDebug, // low-level voice ws/udp events (LOG_LEVEL=debug to enable)
     });
 
     // Log every state transition. Healthy path: signalling -> connecting -> ready.
@@ -59,10 +60,11 @@ export class VoiceManager {
       log.info("voice", `state ${oldState.status} -> ${newState.status}`);
     });
     connection.on("error", (err) => log.error("voice", "connection error", { error: String(err) }));
-    // Low-level debug: this surfaces the voice WebSocket close code (e.g. 4016 =
-    // unknown encryption mode, 4006 = invalid session) and the encryption modes
-    // Discord offered vs. what we selected — the key to the connecting->signalling bounce.
-    connection.on("debug", (msg) => log.debug("voice-dbg", msg));
+    if (voiceDebug) {
+      // Surfaces voice WebSocket close codes / encryption negotiation — the trail
+      // that pinned down the 0.18 handshake bug. Only when LOG_LEVEL=debug.
+      connection.on("debug", (msg) => log.debug("voice-dbg", msg));
+    }
 
     const connectStart = Date.now();
     try {
