@@ -65,7 +65,7 @@ if "%errorlevel%"=="0" (
 )
 echo.
 
-echo [3/5] Checking FFmpeg...
+echo [3/6] Checking FFmpeg...
 where ffmpeg >nul 2>&1
 if "%errorlevel%"=="0" (
     echo   FFmpeg found.
@@ -79,12 +79,42 @@ if "%errorlevel%"=="0" (
 )
 echo.
 
-echo [4/5] Installing npm dependencies...
+echo [4/6] Checking C++ build tools ^(needed to compile @discordjs/opus^)...
+set "VCTOOLS_OK="
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if exist "!VSWHERE!" (
+    for /f "usebackq delims=" %%i in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do set "VCTOOLS_OK=1"
+)
+if defined VCTOOLS_OK (
+    echo   C++ build tools found.
+) else (
+    echo   C++ build tools not found - installing VS 2022 Build Tools via winget...
+    echo   ^(Large download, may take several minutes. Node-gyp finds these via
+    echo    vswhere at build time, so no new terminal is needed afterward.^)
+    winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+    if errorlevel 1 (
+        echo.
+        echo   Automatic install failed. Install the C++ tools manually, then re-run setup:
+        echo     1. Download "Build Tools for Visual Studio 2022" from
+        echo        https://visualstudio.microsoft.com/downloads/  ^(under "Tools for Visual Studio"^)
+        echo     2. In the installer, check the "Desktop development with C++" workload.
+        echo     3. Install, then run setup.bat again.
+        goto :fail
+    )
+    echo   C++ build tools installed.
+)
+echo.
+
+echo [5/6] Installing npm dependencies...
+if exist node_modules (
+    echo   Removing previous node_modules for a clean install...
+    rmdir /s /q node_modules 2>nul
+)
 call npm install
 if errorlevel 1 goto :fail
 echo.
 
-echo [5/5] Building...
+echo [6/6] Building...
 call npm run build
 if errorlevel 1 goto :fail
 
@@ -116,5 +146,11 @@ echo.
 echo ============================================
 echo   SETUP FAILED - see the errors above.
 echo ============================================
+echo.
+echo   If the error mentions @discordjs/opus, node-gyp, or "could not find
+echo   Visual Studio", the C++ build tools are missing or incomplete. Install
+echo   "Build Tools for Visual Studio 2022" with the "Desktop development with
+echo   C++" workload from https://visualstudio.microsoft.com/downloads/ and
+echo   run setup.bat again.
 pause
 exit /b 1
